@@ -526,7 +526,7 @@ class NginxConfiguratorTest(util.NginxTest):
                ['listen', '127.0.0.1'],
                ['server_name', '.example.com'],
                ['server_name', 'example.*'],
-               [], [], []]]],
+               ]]],
             generated_conf)
 
     def test_http_header_hsts(self):

@@ -629,7 +629,7 @@ class NginxConfigurator(common.Installer):
         def _no_ssl_match_func(directive):
             return 'ssl' not in directive
 
-        # remove all ssl addresses and related directives from the new block
+        # remove all ssl addresses and related directives from the http block
         ssl_directives = ['ssl_certificate', 'ssl_certificate_key', 'ssl_dhparam']
         for directive in ssl_directives:
             self.parser.remove_server_directives(http_vhost, directive)
