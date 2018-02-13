@@ -311,7 +311,6 @@ class NginxParser(object):
         :param string directive_name: The directive type to remove
         :param callable match_func: Function of the directive that returns true for directives
             to be deleted.
-        :rtype list: The list of directives that were removed.
         """
         removed = self._modify_server_directives(vhost,
                       functools.partial(_remove_directives, directive_name, match_func))
@@ -328,6 +327,8 @@ class NginxParser(object):
         vhost.raw = new_server
 
     def _modify_server_directives(self, vhost, block_func):
+        """Performs `block_func` on the server directives in `vhost`, and returns the result.
+        """
         filename = vhost.filep
         try:
             result = self.parsed[filename]
@@ -627,15 +628,11 @@ def _comment_out_directive(block, location, include_location):
 
     block[location] = new_dir[0] # set the now-single-line-comment directive back in place
 
-def _matches_directive(directive, directive_name, match_func):
-    return directive and directive[0] == directive_name and \
-        (match_func is None or match_func(directive))
-
 def _find_location(block, directive_name, match_func=None):
     """Finds the index of the first instance of directive_name in block.
        If no line exists, use None."""
     return next((index for index, line in enumerate(block) \
-        if _matches_directive(line, directive_name, match_func)), None)
+        if line and line[0] == directive_name and (match_func is None or match_func(line))), None)
 
 def _add_directive(block, directive, replace, insert_at_top):
     """Adds or replaces a single directive in a config block.
@@ -711,7 +708,7 @@ def _is_certbot_comment(directive):
 
 def _remove_directives(directive_name, match_func, block):
     """Removes directives of name directive_name from a config block if match_func matches.
-       Returns list of directives that were removed.
+       :rtype list: The list of directives that were removed.
     """
     removed = []
     while True:
