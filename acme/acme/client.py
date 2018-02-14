@@ -556,13 +556,17 @@ class ClientV2(ClientBase):
             acme_version=2)
         # "Instance of 'Field' has no key/contact member" bug:
         # pylint: disable=no-member
-        return self._regr_from_response(response)
+        regr = self._regr_from_response(response)
+        self.net.account = regr
+        return regr
 
     def new_order(self, csr_pem):
-        """Request challenges.
+        """Request a new Order object from the server.
 
-        :returns: List of Authorization Resources.
-        :rtype: `list` of `.AuthorizationResource`
+        :param str csr_pem: A CSR in PEM format.
+
+        :returns: The newly created order.
+        :rtype: OrderResource
         """
         csr = cryptography.x509.load_pem_x509_csr(csr_pem,
             cryptography.hazmat.backends.default_backend())
@@ -576,20 +580,10 @@ class ClientV2(ClientBase):
                 value=name))
         order = messages.NewOrder(identifiers=identifiers)
         response = self.net.post(self.directory['newOrder'], order)
-        order_response = self._order_resource_from_response(
-            response, csr_pem=csr_pem)
-        return order_response
-
-    def _order_resource_from_response(self, response, uri=None, csr_pem=None):
         body = messages.Order.from_json(response.json())
         authorizations = []
         for url in body.authorizations:
             authorizations.append(self._authzr_from_response(self.net.get(url)))
-        fullchain_pem = None
-        if body.certificate is not None:
-            certificate_response = self.net.get(body.certificate, content_type=None)
-            if certificate_response.ok:
-                fullchain_pem = certificate_response.text
         return messages.OrderResource(
             body=body,
             uri=response.headers.get('Location', uri),
@@ -597,36 +591,51 @@ class ClientV2(ClientBase):
             authorizations=authorizations,
             csr_pem=csr_pem)
 
-    def poll_order_and_request_issuance(self, orderr, max_time=datetime.timedelta(seconds=90)):
+    def poll_and_finalize(self, orderr, deadline=None):
+        if deadline is None:
+            deadline = datetime.datetime.now() + datetime.timedelta(seconds=90)
+        orderr = self.poll_authorizations(orderr, deadline)
+        return self.finalize_order(orderr, deadline)
+
+    def poll_authorizations(self, orderr, deadline):
         """Poll Order Resource for status."""
         responses = []
-        deadline = datetime.datetime.now() + max_time
         for url in orderr.body.authorizations:
             while datetime.datetime.now() < deadline:
-                time.sleep(1)
                 authzr = self._authzr_from_response(self.net.get(url), uri=url)
                 if authzr.body.status != messages.STATUS_PENDING:
                     responses.append(authzr)
                     break
+                time.sleep(1)
+        # If we didn't get a response for every authorization, we fell through
+        # the bottom of the loop due to hitting the deadline.
+        if len(responses) > orderr.body.authorizations:
+            raise TimeoutError()
+        failed = []
         for authzr in responses:
             if authzr.body.status != messages.STATUS_VALID:
                 for chall in authzr.body.challenges:
                     if chall.error != None:
-                        raise Exception("failed challenge for %s: %s" %
-                            (authzr.body.identifier.value, chall.error))
-                raise Exception("failed authorization: %s" % authzr.body)
-        latest = self._order_resource_from_response(self.net.get(orderr.uri), uri=orderr.uri)
+                        failed.append(authzr)
+        if len(failed) > 0:
+            raise ValidationError(failed)
+        return orderr.update(authorizations=responses)
 
+    def finalize_order(self, orderr, deadline):
         csr = OpenSSL.crypto.load_certificate_request(
             OpenSSL.crypto.FILETYPE_PEM, orderr.csr_pem)
         wrapped_csr = messages.CertificateRequest(csr=jose.ComparableX509(csr))
         self.net.post(latest.body.finalize, wrapped_csr)
         while datetime.datetime.now() < deadline:
             time.sleep(1)
-            latest = self._order_resource_from_response(self.net.get(orderr.uri), uri=orderr.uri)
-            if latest.fullchain_pem is not None:
-                return latest
-        return None
+            response = self.net.get(orderr.uri)
+            body = messages.Order.from_json(response.json())
+            if body.error is not None:
+                raise IssuanceError(body.error)
+            if body.certificate is not None:
+                certificate_response = self.net.get(body.certificate).text
+                return orderr.update(fullchain_pem=certificate_response)
+        raise TimeoutError()
 
 class ClientNetwork(object):  # pylint: disable=too-many-instance-attributes
     """Wrapper around requests that signs POSTs for authentication.
@@ -642,7 +651,8 @@ class ClientNetwork(object):  # pylint: disable=too-many-instance-attributes
 
     :param josepy.JWK key: Account private key
     :param messages.RegistrationResource account: Account object. Required if you are
-            planning to use .post() with acme_version=2.
+            planning to use .post() with acme_version=2 for anything other than
+            creating a new account; may be set later after registering.
     :param josepy.JWASignature alg: Algoritm to use in signing JWS.
     :param bool verify_ssl: Whether to verify certificates on SSL connections.
     :param str user_agent: String to send as User-Agent header.
